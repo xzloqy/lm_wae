@@ -1,0 +1,4 @@
+/runner/runs/*
+/runner/*.log
+/translator/
+/visualization/*
