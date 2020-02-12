@@ -15,7 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from torch.autograd import Variable
-
+import os
+from tensorboardX import SummaryWriter
 from base.config.base_config import BaseConfig
 from base.data.base_data_loader import Dataloader
 from base.base_trainer import BaseTrainer
@@ -28,6 +29,11 @@ from utils.loss import (recon_loss, total_kld, flow_kld, compute_mmd,
                     compute_nll)
 from data.data import Corpus, get_iterator, PAD_TOKEN, SOS_TOKEN
 import warnings
+
+ts = time.strftime('%Y-%b-%d-%H:%M:%S', time.gmtime())
+def kl_anneal_function(step, k, x0):
+
+    return float(1/(1+np.exp(-k*(step-x0))))
 
 def weight_schedule(t, start=6000, end=40000):
     return max(min((t - 6000) / 40000, 1), 0)
@@ -51,7 +57,7 @@ use_cuda = torch.cuda.is_available()
 ###############################################################################
 # Load Config
 ###############################################################################
-conf_path = 'machine_translation/config/config.conf'
+conf_path = 'lm_wae/config/config.conf'
 config_param = [
                 ('data', 'min_vocab_freq', 'int'),
                 ('data', 'max_length', 'int'),
@@ -151,7 +157,13 @@ optimizer = optim.Adam(model.parameters(), lr=config.lr, betas=(0.9, 0.999), eps
 ###############################################################################
 # Trainer
 ###############################################################################
-
+config.tensorboard_logging = True
+config.logdir = 'runs'
+if config.tensorboard_logging:
+    writer = SummaryWriter(os.path.join(config.logdir, ts))
+    writer.add_text("model", str(model))
+    writer.add_text("config", str(config))
+    writer.add_text("ts", ts)
 class TrainerEpoch(BaseTrainer):
     def __init__(self, model=None, optimizer=None, criterion=None,
                  train_iter=None, valid_iter=None, test_iter=None,
@@ -205,6 +217,8 @@ class TrainerEpoch(BaseTrainer):
 
         size =  min(len(data_iter.data()), self.config.epoch_size * self.config.batch_size)
         for batch_id, batch in enumerate(data_iter, 1):
+            if batch_id == 155:
+                print("1")
             if batch_id == self.config.epoch_size:
                 break
             texts, lengths = batch.text
@@ -212,7 +226,8 @@ class TrainerEpoch(BaseTrainer):
             inputs = texts[:, :-1].clone()
             targets = texts[:, 1:].clone()
 
-            kld_weight = weight_schedule(self.config.epoch_size * ( epoch - 1 ) + batch_id)
+            # kld_weight = weight_schedule(self.config.epoch_size * ( epoch - 1 ) + batch_id)
+            kld_weight = kl_anneal_function(epoch*len(data_iter) + batch_id, 0.0025, 6000 )
             # if epoch > 20:
             #     kld_weight = 0
             q_z, p_z, z, outputs, sum_log_jacobian, penalty, z0 = self.model(inputs, lengths-1)
@@ -222,16 +237,22 @@ class TrainerEpoch(BaseTrainer):
             nll = compute_nll(q_z, p_z, z, z0, sum_log_jacobian, reloss)
             mmd = torch.zeros(1).to(z.device)
             mmd = compute_mmd(p_z, q_z)
-            loss = (reloss + kld_weight * kld) / batch_size + (2.5 - kld_weight) * mmd
+            # loss = (reloss + kld_weight * kld) / batch_size + (2.5 - kld_weight) * mmd
+            loss = (reloss + kld_weight * kld) / batch_size 
             # loss = reloss
             if train is True:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-
+                self.steps += 1
             seq_words += torch.sum(lengths-1).item()
             self.cal_loss(size,reloss.item(),kld.item(),mi_z.item() * batch_size, mmd.item() * batch_size,nll.item() * batch_size,torch.sum(sum_log_jacobian).item())
-        
+            split = 'train'
+            if config.tensorboard_logging:
+                writer.add_scalar("%s/ELBO"%split.upper(), loss.item(), self.steps)
+                writer.add_scalar("%s/NLL_Loss"%split.upper(), nll.item(), self.steps)
+                writer.add_scalar("%s/KL_Loss"%split.upper(), kld.item() / batch_size, self.steps)
+                writer.add_scalar("%s/KL_Weight"%split.upper(), kld_weight, self.steps)
         nll_ppl = self.myloss['negative_ll'] * size / seq_words
         if nll_ppl > 10:
             self.myloss['nll_ppl'] = math.exp(10)
@@ -246,7 +267,7 @@ class TrainerEpoch(BaseTrainer):
         self.logger.info('| Test_loss {} |'.format(self.test_loss))
 
     def run(self, is_train=True):
-
+        self.steps = 0
         if is_train:
             ##############################################################################
             # Train Model
@@ -296,7 +317,7 @@ class TrainerEpoch(BaseTrainer):
                     self.epoch += 1
                 # self.save()
             except KeyboardInterrupt:
-                self.writer.close()
+                writer.close()
                 # self.save()
                 self.logger.info('-' * 80 + '\nExiting from training early.')
                 self.logger.info( '\nthe best model is from epoch {}'.format(self.best_epoch))
@@ -314,7 +335,7 @@ class TrainerEpoch(BaseTrainer):
         
             # Save results
             # self.saveResults()
-            self.writer.close()
+
         else:
             ##############################################################################
             # Test Model

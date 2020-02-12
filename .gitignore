@@ -2,3 +2,5 @@
 /runner/*.log
 /translator/
 /visualization/*
+/log/ptb/*
+*.pyc
