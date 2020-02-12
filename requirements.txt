@@ -1,0 +1,7 @@
+# conda create --name wae python=3.6
+sklearn
+nltk>=3.4.5
+torchvision==1.1.0
+torchtext
+matplotlib
+spacy
